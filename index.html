@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Oligance — Executive Finance Dashboard</title>
+<link rel="stylesheet" href="styles.css?v=3" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.0/chart.umd.min.js"></script>
+<script src="config.js"></script>
+</head>
+<body>
+<div class="app-sticky-header">
+<header class="topbar">
+  <div class="topbar-left">
+    <span class="brand-lockup">
+      <svg class="brand-logo" viewBox="0 0 460 560" role="img" aria-label="Oligance">
+        <path fill="#06aea3" d="M247,60 L247,260 L415,160 Z"/>
+        <path fill="#06aea3" d="M50,205 L50,375 L245,290 Z"/>
+        <path fill="#5b49d3" d="M247,290 L247,480 L415,385 Z"/>
+      </svg>
+      <span class="brand-word">Oligance</span>
+    </span>
+    <span class="brand-sub">Executive Finance Dashboard</span>
+  </div>
+  <div class="topbar-right">
+    <div class="date-filter">
+      <select id="rangePreset" class="control">
+        <option value="all">All Time</option>
+        <option value="this-month">This Month</option>
+        <option value="last-month">Last Month</option>
+        <option value="this-quarter">This Quarter</option>
+        <option value="this-year">This Year</option>
+        <option value="custom">Custom</option>
+      </select>
+      <input type="date" id="startDate" class="control" />
+      <span class="date-sep">–</span>
+      <input type="date" id="endDate" class="control" />
+    </div>
+    <button id="refreshBtn" class="btn-primary">
+      <span class="btn-label">Refresh</span>
+      <span class="spinner" id="refreshSpinner" hidden></span>
+    </button>
+    <span class="last-updated" id="lastUpdated">Last updated: —</span>
+  </div>
+</header>
+
+<nav class="tabbar" id="tabbar">
+  <button class="tab active" data-tab="overview">Overview</button>
+  <button class="tab" data-tab="imfnd">IMFND</button>
+  <button class="tab" data-tab="as">A.S</button>
+  <button class="tab" data-tab="oligenceai">Oligence AI</button>
+  <button class="tab" data-tab="cashflow">Cash Flow</button>
+</nav>
+</div>
+
+<main id="app" class="app">
+  <!-- Panels are rendered here by app.js -->
+</main>
+
+<template id="tpl-skeleton">
+  <div class="skeleton-wrap">
+    <div class="skeleton-row">
+      <div class="skel-card"></div>
+      <div class="skel-card"></div>
+      <div class="skel-card"></div>
+      <div class="skel-card"></div>
+    </div>
+    <div class="skel-table"></div>
+  </div>
+</template>
+
+<script src="data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -3,8 +3,7 @@
  *
  * Data flow:
  *  - fetchDashboardData({ range, startDate, endDate }) is defined in
- *    mock-data.js (see that file's header comment for the full API
- *    contract / Phase 2 webhook swap instructions).
+ *    data.js (see that file's header comment for the full API contract).
  *  - This file calls it in exactly two places (search "FETCH TRIGGER"):
  *      1) on initial page load, always with { range: 'all' }
  *      2) when the Refresh button is clicked, with whatever range the
@@ -29,7 +28,11 @@ const els = {
   refreshBtn: document.getElementById('refreshBtn'),
   refreshSpinner: document.getElementById('refreshSpinner'),
   lastUpdated: document.getElementById('lastUpdated'),
+  logoutBtn: document.getElementById('logoutBtn'),
+  usersTab: document.getElementById('usersTab'),
 };
+
+const usersState = { list: null, loading: false, error: null, resetTarget: null };
 
 const charts = {}; // keyed by canvas id, so we can destroy/recreate on re-render
 
@@ -68,6 +71,55 @@ function emptyPanel(label) {
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// A client may list its services as an array (new shape) or as flat serviceType/
+// serviceName/method/notes fields (legacy/live-webhook shape) — normalize to an array.
+function clientServices(c) {
+  if (Array.isArray(c.services) && c.services.length) return c.services;
+  if (c.serviceType || c.serviceName || c.method || c.notes) {
+    return [{ serviceType: c.serviceType, serviceName: c.serviceName, method: c.method, notes: c.notes }];
+  }
+  return [];
+}
+
+// The webhook may send one row per client (with a services array or a single flat
+// service) or one row per client+service (same client name repeated). Merge same-name
+// rows into a single client with a combined services list, keeping only the first
+// non-empty financial figures so repeated rows for one client aren't double-counted.
+function groupClients(clients) {
+  const order = [];
+  const map = new Map();
+  clients.forEach((c) => {
+    const key = c.name || '';
+    if (!map.has(key)) {
+      map.set(key, { name: c.name, monthlyFee: 0, collected: 0, outstanding: 0, expense: 0, status: c.status, services: [], months: [] });
+      order.push(key);
+    }
+    const g = map.get(key);
+    if (!g.monthlyFee) g.monthlyFee = c.monthlyFee || 0;
+    if (!g.collected) g.collected = c.collected || 0;
+    if (!g.outstanding) g.outstanding = c.outstanding || 0;
+    if (!g.expense) g.expense = c.expense || 0;
+    g.services.push(...clientServices(c));
+    if (Array.isArray(c.months)) g.months.push(...c.months);
+  });
+  return order.map((key) => map.get(key));
+}
+
+// Revenue/collected/outstanding for a client: prefer summing its monthly
+// breakdown (c.months, the new per-month shape) when the webhook sends one,
+// falling back to the flat client-level totals (legacy shape) otherwise.
+function clientTotals(c) {
+  if (Array.isArray(c.months) && c.months.length) {
+    return c.months.reduce((acc, m) => {
+      acc.revenue += m.revenue || 0;
+      acc.collected += m.collected || 0;
+      acc.outstanding += m.outstanding || 0;
+      return acc;
+    }, { revenue: 0, collected: 0, outstanding: 0 });
+  }
+  return { revenue: c.monthlyFee || 0, collected: c.collected || 0, outstanding: c.outstanding || 0 };
 }
 
 // ---------------------------------------------------------------- date presets
@@ -177,6 +229,15 @@ els.refreshBtn.addEventListener('click', () => {
   loadData(currentRangeParams()); // <-- FETCH TRIGGER (Refresh)
 });
 
+els.logoutBtn.addEventListener('click', async () => {
+  els.logoutBtn.disabled = true;
+  try {
+    await fetch('/api/logout', { method: 'POST' });
+  } finally {
+    window.location.href = '/login.html';
+  }
+});
+
 els.tabbar.addEventListener('click', (e) => {
   const btn = e.target.closest('.tab');
   if (!btn) return;
@@ -188,6 +249,8 @@ els.tabbar.addEventListener('click', (e) => {
 // ---------------------------------------------------------------- render root
 
 function render() {
+  if (state.activeTab === 'users') return renderUsersTab();
+
   if (state.loading) {
     els.app.innerHTML = document.getElementById('tpl-skeleton').innerHTML;
     return;
@@ -210,9 +273,181 @@ function render() {
   switch (state.activeTab) {
     case 'overview': return renderOverview(errorBanner);
     case 'imfnd': return renderBrand('IMFND', 'IMFND', errorBanner);
-    case 'as': return renderBrand('AS', 'A.S', errorBanner);
+    case 'as': return renderBrand('AS', 'AS', errorBanner);
     case 'oligenceai': return renderOligenceAI(errorBanner);
     case 'cashflow': return renderCashFlow(errorBanner);
+  }
+}
+
+// -------------------------------------------------------------- Team Members
+
+async function loadUsers() {
+  usersState.loading = true;
+  usersState.error = null;
+  render();
+  try {
+    const res = await fetch('/api/users');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to load members');
+    usersState.list = data.users;
+  } catch (err) {
+    usersState.error = err.message;
+  } finally {
+    usersState.loading = false;
+    render();
+  }
+}
+
+function renderUsersTab() {
+  if (usersState.list === null && !usersState.loading && !usersState.error) {
+    loadUsers();
+    return;
+  }
+
+  const rows = (usersState.list || [])
+    .map((u) => {
+      const added = new Date(u.addedAt).toLocaleDateString();
+      const roleBadge = `<span class="role-badge ${u.role}">${u.role === 'owner' ? 'Owner' : 'Member'}</span>`;
+      const removeAction = u.role === 'owner'
+        ? `<span style="color:var(--text-faint);font-size:12px;">Protected</span>`
+        : `<button class="users-remove-btn" data-email="${escapeHtml(u.email)}">Remove</button>`;
+      const resetAction = `<button class="users-reset-btn" data-email="${escapeHtml(u.email)}">Reset password</button>`;
+      return `<tr><td>${escapeHtml(u.email)}</td><td>${roleBadge}</td><td>${added}</td><td>${resetAction} ${removeAction}</td></tr>`;
+    })
+    .join('');
+
+  const listBody = usersState.loading
+    ? '<p>Loading…</p>'
+    : usersState.error
+      ? `<p class="users-error visible">${escapeHtml(usersState.error)}</p>`
+      : `<table class="users-table">
+           <thead><tr><th>Email</th><th>Role</th><th>Added</th><th>Actions</th></tr></thead>
+           <tbody>${rows}</tbody>
+         </table>`;
+
+  const resetCard = usersState.resetTarget
+    ? `<div class="users-card">
+         <h3>Reset password</h3>
+         <p>Set a new password for <strong>${escapeHtml(usersState.resetTarget)}</strong>. No need to know the old one.</p>
+         <form class="users-form" id="resetPasswordForm">
+           <label>New password
+             <input type="password" id="resetPasswordValue" minlength="8" required placeholder="8 characters or more" />
+           </label>
+           <button type="submit" class="btn-primary" id="resetPasswordBtn">Save new password</button>
+           <button type="button" class="btn-secondary" id="resetPasswordCancel">Cancel</button>
+         </form>
+         <div class="users-error" id="resetPasswordError"></div>
+       </div>`
+    : '';
+
+  els.app.innerHTML = `
+    <div class="users-panel">
+      <div class="panel-header">
+        <h1>Team Members</h1>
+        <p>Everyone who can sign in to this dashboard.</p>
+      </div>
+      <div class="users-card">
+        <h3>Add a member</h3>
+        <p>They sign in at /login with this email and password.</p>
+        <form class="users-form" id="addUserForm">
+          <label>Email
+            <input type="email" id="newUserEmail" required />
+          </label>
+          <label>Password
+            <input type="password" id="newUserPassword" minlength="8" required placeholder="8 characters or more" />
+          </label>
+          <button type="submit" class="btn-primary" id="addUserBtn">Add member</button>
+        </form>
+        <div class="users-error" id="addUserError"></div>
+      </div>
+      ${resetCard}
+      <div class="users-card">
+        <h3>All members</h3>
+        ${listBody}
+      </div>
+    </div>
+  `;
+
+  const form = document.getElementById('addUserForm');
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const email = document.getElementById('newUserEmail').value;
+    const password = document.getElementById('newUserPassword').value;
+    const errEl = document.getElementById('addUserError');
+    const btn = document.getElementById('addUserBtn');
+    errEl.classList.remove('visible');
+    btn.disabled = true;
+    try {
+      const res = await fetch('/api/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to add member');
+      usersState.list = null;
+      loadUsers();
+    } catch (err) {
+      errEl.textContent = err.message;
+      errEl.classList.add('visible');
+      btn.disabled = false;
+    }
+  });
+
+  els.app.querySelectorAll('.users-remove-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      if (!confirm(`Remove ${btn.dataset.email}?`)) return;
+      btn.disabled = true;
+      try {
+        const res = await fetch(`/api/users?email=${encodeURIComponent(btn.dataset.email)}`, { method: 'DELETE' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to remove member');
+        usersState.list = null;
+        loadUsers();
+      } catch (err) {
+        alert(err.message);
+        btn.disabled = false;
+      }
+    });
+  });
+
+  els.app.querySelectorAll('.users-reset-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      usersState.resetTarget = btn.dataset.email;
+      render();
+    });
+  });
+
+  const resetForm = document.getElementById('resetPasswordForm');
+  if (resetForm) {
+    resetForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const password = document.getElementById('resetPasswordValue').value;
+      const errEl = document.getElementById('resetPasswordError');
+      const btn = document.getElementById('resetPasswordBtn');
+      errEl.classList.remove('visible');
+      btn.disabled = true;
+      try {
+        const res = await fetch('/api/users', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: usersState.resetTarget, password }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to reset password');
+        usersState.resetTarget = null;
+        render();
+      } catch (err) {
+        errEl.textContent = err.message;
+        errEl.classList.add('visible');
+        btn.disabled = false;
+      }
+    });
+
+    document.getElementById('resetPasswordCancel').addEventListener('click', () => {
+      usersState.resetTarget = null;
+      render();
+    });
   }
 }
 
@@ -232,7 +467,7 @@ function renderOverview(errorBanner) {
     </div>
 
     <div class="kpi-row">
-      ${kpiCard('Total Revenue (EGP)', fmtMoney(k.totalRevenue), trendHtml(trends.totalRevenue))}
+      ${kpiCard('Total Cash in (EGP)', fmtMoney(k.totalRevenue), trendHtml(trends.totalRevenue))}
       ${kpiCard('Total Expenses (EGP)', fmtMoney(k.totalExpenses), trendHtml(trends.totalExpenses, { invert: true }))}
       ${kpiCard('Net Profit (EGP)', fmtMoney(k.netProfit), trendHtml(trends.netProfit))}
       ${kpiCard('Net Margin %', fmtPct(k.netMargin), `<span class="kpi-caption">${k.netMargin === undefined || k.netMargin === null ? '' : (k.netMargin >= 40 ? 'Healthy profitability' : 'Margin needs attention')}</span>`)}
@@ -244,7 +479,7 @@ function renderOverview(errorBanner) {
         <div class="table-scroll">
           <table>
             <thead>
-              <tr><th>Brand</th><th class="num">Revenue</th><th class="num">Expenses</th><th class="num">Net Profit</th><th class="num">Margin %</th></tr>
+              <tr><th>Brand</th><th class="num">Cash in</th><th class="num">Expenses</th><th class="num">Net Profit</th><th class="num">Margin %</th></tr>
             </thead>
             <tbody>
               ${brandTable.length ? brandTable.map((b) => `
@@ -298,6 +533,21 @@ function kpiCard(label, value, sub) {
   `;
 }
 
+// Cash-in transactions count card: reads only the current brand's own kpis,
+// so IMFND's card is fed by IMFND's sheet and A.S's card by A.S's sheet.
+function txnCountCard(k) {
+  const count = k.cashTransactionsCount;
+  const value = count === undefined || count === null ? '—' : count.toLocaleString('en-US');
+
+  return `
+    <div class="kpi-card">
+      <div class="kpi-label">Cash In — Number of Transactions</div>
+      <div class="kpi-value">${value}</div>
+      <span class="kpi-caption">Transactions behind Total Cash in (EGP)</span>
+    </div>
+  `;
+}
+
 // ---------------------------------------------------------------- Brand tabs (IMFND / A.S)
 
 function renderBrand(key, displayName, errorBanner) {
@@ -322,21 +572,23 @@ function renderBrand(key, displayName, errorBanner) {
     ${errorBanner || ''}
     <div class="panel-header">
       <h1>${displayName} — Brand Detail</h1>
-      <p>Training &amp; diploma business · Revenue, sales performance &amp; expenses</p>
+      <p>Training &amp; diploma business · Cash in, sales performance &amp; expenses</p>
     </div>
 
-    <div class="kpi-row kpi-3">
-      ${kpiCard('Total Enrollments', k.totalEnrollments === undefined || k.totalEnrollments === null ? '—' : k.totalEnrollments.toLocaleString('en-US'), `<span class="kpi-caption">${k.activeProgramsCount === undefined || k.activeProgramsCount === null ? '' : `Across ${k.activeProgramsCount} active programs`}</span>`)}
-      ${kpiCard('Total Revenue (EGP)', fmtMoney(k.totalRevenue), trendHtml(trends.totalRevenue))}
-      ${kpiCard('Avg. Revenue per Enrollment (EGP)', fmtMoney(k.avgRevenuePerEnrollment), `<span class="kpi-caption">Blended across all courses</span>`)}
+    <div class="kpi-row kpi-5">
+      ${kpiCard('Tickets Sold', k.totalEnrollments === undefined || k.totalEnrollments === null ? '—' : k.totalEnrollments.toLocaleString('en-US'), `<span class="kpi-caption">${k.activeProgramsCount === undefined || k.activeProgramsCount === null ? '' : `Across ${k.activeProgramsCount} active programs`}</span>`)}
+      ${kpiCard('Total New Tickets Revenue', fmtMoney(k.newTicketsRevenue), trendHtml(trends.newTicketsRevenue))}
+      ${kpiCard('Avg.New Tickets', fmtMoney(k.avgRevenuePerEnrollment), `<span class="kpi-caption">Blended across all courses</span>`)}
+      ${kpiCard('Total Cash in (EGP)', fmtMoney(k.totalRevenue), trendHtml(trends.totalRevenue))}
+      ${txnCountCard(k)}
     </div>
 
     <div class="section">
-      <h2 class="section-title">Revenue by Diploma / Course</h2>
+      <h2 class="section-title">Cash in by Diploma / Course</h2>
       <div class="grid-2">
         <div class="table-scroll">
           <table>
-            <thead><tr><th>Course / Diploma</th><th class="num">Tickets Sold</th><th class="num">Revenue</th></tr></thead>
+            <thead><tr><th>Course / Diploma</th><th class="num">Tickets Sold</th><th class="num">Cash in</th></tr></thead>
             <tbody>
               ${courses.length ? courses.map((c) => `
                 <tr><td>${escapeHtml(c.name)}</td><td class="num">${(c.tickets || 0).toLocaleString('en-US')}</td><td class="num">${fmtMoney(c.revenue)}</td></tr>
@@ -354,7 +606,7 @@ function renderBrand(key, displayName, errorBanner) {
       <div class="grid-2">
         <div class="table-scroll">
           <table>
-            <thead><tr><th>Sales Representative</th><th class="num">Revenue</th><th class="num">Tickets Sold</th></tr></thead>
+            <thead><tr><th>Sales Representative</th><th class="num">Cash in</th><th class="num">Tickets Sold</th></tr></thead>
             <tbody>
               ${salesReps.length ? salesReps.map((r) => `
                 <tr><td>${escapeHtml(r.name)}</td><td class="num">${fmtMoney(r.revenue)}</td><td class="num">${(r.tickets || 0).toLocaleString('en-US')}</td></tr>
@@ -418,12 +670,77 @@ function paymentMiniTable(title, rows, total) {
   `;
 }
 
+// Legacy (flat) shape: one client-row per client, one row per service under it.
+function clientOverviewRowsFlat(clients) {
+  return clients.map((c) => {
+    const rows = c.services.length ? c.services : [{}];
+    return rows.map((s, i) => `
+      <tr class="${i === 0 ? 'client-row' : ''}">
+        <td>${i === 0 ? escapeHtml(c.name) : ''}</td>
+        <td class="num">${i === 0 ? fmtMoney(c.monthlyFee) : ''}</td>
+        <td class="num">${i === 0 ? fmtMoney(c.collected) : ''}</td>
+        <td class="num">${i === 0 ? fmtMoney(c.outstanding) : ''}</td>
+        <td>${escapeHtml(s.serviceType || '')}</td>
+        <td>${escapeHtml(s.serviceName || '')}</td>
+        <td>${escapeHtml(s.method || '')}</td>
+        <td>${escapeHtml(s.notes || '')}</td>
+      </tr>
+    `).join('');
+  }).join('');
+}
+
+// New (grouped) shape: per client — a TOTAL row, then one row-group per
+// month (client.months[]), each month split into its service rows.
+function clientOverviewRowsGrouped(clients) {
+  return clients.map((c) => {
+    const totals = clientTotals(c);
+    const totalRow = `
+      <tr class="client-row">
+        <td>${escapeHtml(c.name)}</td>
+        <td>TOTAL</td>
+        <td class="num">${fmtMoney(totals.revenue)}</td>
+        <td class="num">${fmtMoney(totals.collected)}</td>
+        <td class="num">${fmtMoney(totals.outstanding)}</td>
+        <td></td><td></td><td></td><td></td>
+      </tr>
+    `;
+    const monthRows = (c.months || []).map((m, mi) => {
+      const services = (m.services && m.services.length) ? m.services : [{}];
+      const summaryRow = `
+        <tr class="month-summary-row ${mi > 0 ? 'month-divider' : ''}">
+          <td></td>
+          <td>${escapeHtml(m.month || '')}</td>
+          <td class="num">${fmtMoney(m.revenue)}</td>
+          <td class="num">${fmtMoney(m.collected)}</td>
+          <td class="num">${fmtMoney(m.outstanding)}</td>
+          <td></td><td></td><td></td><td></td>
+        </tr>
+      `;
+      const serviceRows = services.map((s) => `
+        <tr>
+          <td></td>
+          <td></td>
+          <td class="num"></td>
+          <td class="num">${s.collected !== undefined && s.collected !== null ? fmtMoney(s.collected) : ''}</td>
+          <td class="num"></td>
+          <td>${escapeHtml(s.serviceType || '')}</td>
+          <td>${escapeHtml(s.serviceName || '')}</td>
+          <td>${escapeHtml(s.method || '')}</td>
+          <td>${escapeHtml(s.notes || '')}</td>
+        </tr>
+      `).join('');
+      return summaryRow + serviceRows;
+    }).join('');
+    return totalRow + monthRows;
+  }).join('');
+}
+
 // ---------------------------------------------------------------- Oligence AI tab
 
 function renderOligenceAI(errorBanner) {
   const b = (state.data.brands && state.data.brands.OligenceAI) || {};
   const k = b.kpis || {};
-  const clients = b.clients || [];
+  const clients = groupClients(b.clients || []);
   const expenses = b.expenses || [];
   const paymentIn = (b.paymentMethods && b.paymentMethods.in) || [];
   const paymentOut = (b.paymentMethods && b.paymentMethods.out) || [];
@@ -431,8 +748,25 @@ function renderOligenceAI(errorBanner) {
   const totalExpenses = expenses.reduce((s, e) => s + (e.amount || 0), 0);
   const totalIn = paymentIn.reduce((s, p) => s + (p.amount || 0), 0);
   const totalOut = paymentOut.reduce((s, p) => s + (p.amount || 0), 0);
-  const totalCollected = clients.reduce((s, c) => s + (c.collected || 0), 0);
-  const totalOutstanding = clients.reduce((s, c) => s + (c.outstanding || 0), 0);
+  const totalCollected = clients.reduce((s, c) => s + clientTotals(c).collected, 0);
+  const totalOutstanding = clients.reduce((s, c) => s + clientTotals(c).outstanding, 0);
+  const totalMonthlyRevenue = clients.reduce((s, c) => s + clientTotals(c).revenue, 0);
+  const totalClientExpense = clients.reduce((s, c) => s + (c.expense || 0), 0);
+  const totalClientNet = totalCollected - totalClientExpense;
+  const hasMonthlyBreakdown = clients.some((c) => c.months && c.months.length);
+
+  const serviceRevenue = [];
+  clients.forEach((c) => {
+    const list = c.services.length ? c.services : [{ serviceName: 'Other', revenue: c.monthlyFee || 0 }];
+    list.forEach((s) => {
+      const key = s.serviceName || 'Other';
+      const amount = s.revenue || 0;
+      const row = serviceRevenue.find((r) => r.serviceName === key);
+      if (row) row.revenue += amount;
+      else serviceRevenue.push({ serviceName: key, revenue: amount });
+    });
+  });
+  const totalServiceRevenue = serviceRevenue.reduce((s, r) => s + r.revenue, 0);
 
   els.app.innerHTML = `
     ${errorBanner || ''}
@@ -442,6 +776,7 @@ function renderOligenceAI(errorBanner) {
     </div>
 
     <div class="kpi-row">
+      ${kpiCard('Monthly Revenue (EGP)', fmtMoney(totalMonthlyRevenue), `<span class="kpi-caption">Oligence AI</span>`)}
       ${kpiCard('Collected (EGP)', fmtMoney(k.collected), `<span class="kpi-caption">${k.collectionRate === undefined || k.collectionRate === null ? '' : `${fmtPct(k.collectionRate)} of billed`}</span>`)}
       ${kpiCard('Outstanding (EGP)', fmtMoney(k.outstanding), `<span class="kpi-caption">Needs follow-up</span>`)}
       ${kpiCard('Collection Rate %', fmtPct(k.collectionRate), `<span class="kpi-caption">Target: 95%+</span>`)}
@@ -449,47 +784,122 @@ function renderOligenceAI(errorBanner) {
 
     <div class="section">
       <h2 class="section-title">Client Overview</h2>
+      <div class="grid-2 stacked">
+        <div class="table-scroll">
+          <table>
+            ${hasMonthlyBreakdown ? `
+              <thead>
+                <tr>
+                  <th>Client Name</th><th>Month</th><th class="num">Monthly Revenue</th><th class="num">Collected</th><th class="num">Outstanding</th>
+                  <th>Service Type</th><th>Service Name</th><th>Method</th><th>Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${clients.length ? clientOverviewRowsGrouped(clients) : emptyRow(9)}
+                ${clients.length ? `
+                  <tr class="total-row">
+                    <td>Total</td><td></td><td class="num">${fmtMoney(totalMonthlyRevenue)}</td><td class="num">${fmtMoney(totalCollected)}</td>
+                    <td class="num">${fmtMoney(totalOutstanding)}</td><td></td><td></td><td></td><td></td>
+                  </tr>
+                ` : ''}
+              </tbody>
+            ` : `
+              <thead>
+                <tr>
+                  <th>Client Name</th><th class="num">Monthly Revenue</th><th class="num">Collected</th><th class="num">Outstanding</th>
+                  <th>Service Type</th><th>Service Name</th><th>Method</th><th>Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${clients.length ? clientOverviewRowsFlat(clients) : emptyRow(8)}
+                ${clients.length ? `
+                  <tr class="total-row">
+                    <td>Total</td><td class="num">${fmtMoney(totalMonthlyRevenue)}</td><td class="num">${fmtMoney(totalCollected)}</td>
+                    <td class="num">${fmtMoney(totalOutstanding)}</td><td></td><td></td><td></td><td></td>
+                  </tr>
+                ` : ''}
+              </tbody>
+            `}
+          </table>
+        </div>
+        <div class="chart-wrap">${clients.length ? '<canvas id="chartClientCollections"></canvas>' : emptyPanel()}</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2 class="section-title">Client Cash in vs Expense</h2>
       <div class="table-scroll">
         <table>
           <thead>
             <tr>
-              <th>Client Name</th><th class="num">Collected</th><th class="num">Outstanding</th>
-              <th>Service Type</th><th>Method</th><th>Notes</th>
+              <th>Client Name</th><th class="num">Cash in</th><th class="num">Expense</th><th class="num">Net</th>
             </tr>
           </thead>
           <tbody>
-            ${clients.length ? clients.map((c) => `
+            ${clients.length ? clients.map((c) => {
+              const collected = clientTotals(c).collected;
+              return `
               <tr>
                 <td>${escapeHtml(c.name)}</td>
-                <td class="num">${fmtMoney(c.collected)}</td>
-                <td class="num">${fmtMoney(c.outstanding)}</td>
-                <td>${escapeHtml(c.serviceType || '')}</td>
-                <td>${escapeHtml(c.method || '')}</td>
-                <td>${escapeHtml(c.notes || '')}</td>
+                <td class="num">${fmtMoney(collected)}</td>
+                <td class="num">${fmtMoney(c.expense)}</td>
+                <td class="num">${fmtMoney(collected - (c.expense || 0))}</td>
               </tr>
-            `).join('') : emptyRow(6)}
+            `;
+            }).join('') : emptyRow(4)}
             ${clients.length ? `
               <tr class="total-row">
                 <td>Total</td><td class="num">${fmtMoney(totalCollected)}</td>
-                <td class="num">${fmtMoney(totalOutstanding)}</td><td></td><td></td><td></td>
+                <td class="num">${fmtMoney(totalClientExpense)}</td><td class="num">${fmtMoney(totalClientNet)}</td>
               </tr>
             ` : ''}
           </tbody>
         </table>
       </div>
-      <div class="chart-wrap">${clients.length ? '<canvas id="chartClientCollections"></canvas>' : emptyPanel()}</div>
+    </div>
+
+    <div class="section">
+      <h2 class="section-title">Cash in by Service</h2>
+      <div class="grid-2">
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Service Name</th><th class="num">Cash in</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${serviceRevenue.length ? serviceRevenue.map((r) => `
+                <tr>
+                  <td>${escapeHtml(r.serviceName)}</td>
+                  <td class="num">${fmtMoney(r.revenue)}</td>
+                </tr>
+              `).join('') : emptyRow(2)}
+              ${serviceRevenue.length ? `
+                <tr class="total-row">
+                  <td>Total</td><td class="num">${fmtMoney(totalServiceRevenue)}</td>
+                </tr>
+              ` : ''}
+            </tbody>
+          </table>
+        </div>
+        <div class="chart-wrap">${serviceRevenue.length ? '<canvas id="chartServiceRevenue"></canvas>' : emptyPanel()}</div>
+      </div>
     </div>
 
     <div class="section">
       <h2 class="section-title">Expenses</h2>
-      <div class="table-scroll">
-        <table>
-          <thead><tr><th>Description</th><th class="num">Amount</th></tr></thead>
-          <tbody>
-            ${expenses.length ? expenses.map((e) => `<tr><td>${escapeHtml(e.description)}</td><td class="num">${fmtMoney(e.amount)}</td></tr>`).join('') : emptyRow(2)}
-            ${expenses.length ? `<tr class="total-row"><td>Total</td><td class="num">${fmtMoney(totalExpenses)}</td></tr>` : ''}
-          </tbody>
-        </table>
+      <div class="grid-2">
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Description</th><th class="num">Amount</th></tr></thead>
+            <tbody>
+              ${expenses.length ? expenses.map((e) => `<tr><td>${escapeHtml(e.description)}</td><td class="num">${fmtMoney(e.amount)}</td></tr>`).join('') : emptyRow(2)}
+              ${expenses.length ? `<tr class="total-row"><td>Total</td><td class="num">${fmtMoney(totalExpenses)}</td></tr>` : ''}
+            </tbody>
+          </table>
+        </div>
+        <div class="chart-wrap">${expenses.length ? '<canvas id="chartOligenceExpenses"></canvas>' : emptyPanel()}</div>
       </div>
     </div>
 
@@ -504,6 +914,8 @@ function renderOligenceAI(errorBanner) {
   `;
 
   if (clients.length) drawClientCollectionsChart(clients);
+  if (serviceRevenue.length) drawServiceRevenueChart(serviceRevenue);
+  if (expenses.length) drawExpensesPieChart('chartOligenceExpenses', expenses.map((e) => e.description), expenses.map((e) => e.amount));
   if (paymentIn.length || paymentOut.length) drawPaymentMethodsChart('chartPaymentMethods', paymentIn, paymentOut);
 }
 
@@ -719,6 +1131,37 @@ function drawBrandComparisonChart(brandTable) {
   });
 }
 
+const clientBarLabelPlugin = {
+  id: 'clientBarLabelPlugin',
+  afterDatasetsDraw(chart) {
+    const { ctx } = chart;
+    const meta0 = chart.getDatasetMeta(0);
+    const meta1 = chart.getDatasetMeta(1);
+    const labels = chart.data.labels;
+    ctx.save();
+    ctx.font = '12px sans-serif';
+    ctx.textBaseline = 'middle';
+    meta0.data.forEach((bar, i) => {
+      const label = labels[i];
+      if (!label) return;
+      const textWidth = ctx.measureText(label).width;
+      const segWidth = bar.x - bar.base;
+      const insideBar = segWidth > textWidth + 16;
+      if (insideBar) {
+        ctx.fillStyle = '#ffffff';
+        ctx.textAlign = 'left';
+        ctx.fillText(label, bar.base + 8, bar.y);
+      } else {
+        const endX = (meta1.data[i] ? meta1.data[i].x : bar.x);
+        ctx.fillStyle = '#3a3a42';
+        ctx.textAlign = 'left';
+        ctx.fillText(label, endX + 8, bar.y);
+      }
+    });
+    ctx.restore();
+  },
+};
+
 const barLabelPlugin = {
   id: 'barLabelPlugin',
   afterDatasetsDraw(chart) {
@@ -883,17 +1326,18 @@ function drawClientCollectionsChart(clients) {
     data: {
       labels: clients.map((c) => c.name),
       datasets: [
-        { label: 'Collected', data: clients.map((c) => c.collected || 0), backgroundColor: '#1f9d55', borderRadius: 2 },
-        { label: 'Outstanding', data: clients.map((c) => c.outstanding || 0), backgroundColor: '#c0392b', borderRadius: 2 },
+        { label: 'Collected', data: clients.map((c) => clientTotals(c).collected), backgroundColor: '#1f9d55', borderRadius: 2 },
+        { label: 'Outstanding', data: clients.map((c) => clientTotals(c).outstanding), backgroundColor: '#c0392b', borderRadius: 2 },
       ],
     },
     options: {
       indexAxis: 'y',
       responsive: true,
       maintainAspectRatio: false,
+      layout: { padding: { right: 60 } },
       scales: {
         x: { stacked: true, grid: { color: '#e4e5e1' }, ticks: { callback: (v) => fmtMoney(v) } },
-        y: { stacked: true, grid: { display: false } },
+        y: { stacked: true, grid: { display: false }, ticks: { display: false } },
       },
       plugins: {
         legend: { position: 'bottom', labels: { boxWidth: 12, font: { size: 12 }, color: '#6b7076' } },
@@ -904,6 +1348,42 @@ function drawClientCollectionsChart(clients) {
         },
       },
     },
+    plugins: [clientBarLabelPlugin],
+  });
+}
+
+function drawServiceRevenueChart(serviceRevenue) {
+  const canvasId = 'chartServiceRevenue';
+  destroyChart(canvasId);
+  const ctx = document.getElementById(canvasId);
+  if (!ctx) return;
+
+  charts[canvasId] = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: serviceRevenue.map((r) => r.serviceName),
+      datasets: [
+        { label: 'Revenue', data: serviceRevenue.map((r) => r.revenue || 0), backgroundColor: '#2f6fed', borderRadius: 2 },
+      ],
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      scales: {
+        x: { grid: { color: '#e4e5e1' }, ticks: { callback: (v) => fmtMoney(v) } },
+        y: { grid: { display: false }, ticks: { display: false } },
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (item) => `${item.dataset.label}: ${fmtMoney(item.raw)} EGP`,
+          },
+        },
+      },
+    },
+    plugins: [barLabelPlugin],
   });
 }
 
@@ -916,4 +1396,11 @@ function drawClientCollectionsChart(clients) {
   els.endDate.value = '';
 
   loadData({ range: 'all', startDate: null, endDate: null }); // <-- FETCH TRIGGER (initial load)
+
+  fetch('/api/me')
+    .then((res) => (res.ok ? res.json() : null))
+    .then((me) => {
+      if (me && me.role === 'owner') els.usersTab.hidden = false;
+    })
+    .catch(() => {});
 })();

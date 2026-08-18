@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Sign In — Oligance Dashboard</title>
+<style>
+  :root {
+    --teal: #06aea3;
+    --purple: #5b49d3;
+    --bg: #f4f6f8;
+    --card: #ffffff;
+    --text: #1c2430;
+    --muted: #6b7685;
+    --border: #e2e6ea;
+    --error: #d64545;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    color: var(--text);
+  }
+  .card {
+    width: 100%;
+    max-width: 380px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 32px 28px;
+    box-shadow: 0 8px 30px rgba(20, 30, 45, 0.06);
+  }
+  .brand-lockup {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    justify-content: center;
+    margin-bottom: 6px;
+  }
+  .brand-logo { width: 28px; height: 34px; }
+  .brand-word { font-size: 20px; font-weight: 700; letter-spacing: -0.02em; }
+  .brand-sub {
+    text-align: center;
+    color: var(--muted);
+    font-size: 13px;
+    margin-bottom: 28px;
+  }
+  label {
+    display: block;
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 6px;
+    margin-top: 16px;
+  }
+  input {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 14px;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  input:focus { border-color: var(--teal); }
+  button {
+    width: 100%;
+    margin-top: 24px;
+    padding: 11px 12px;
+    border: none;
+    border-radius: 8px;
+    background: linear-gradient(135deg, var(--teal), var(--purple));
+    color: #fff;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.6; cursor: not-allowed; }
+  .error {
+    margin-top: 14px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: rgba(214, 69, 69, 0.08);
+    color: var(--error);
+    font-size: 13px;
+    display: none;
+  }
+  .error.visible { display: block; }
+</style>
+</head>
+<body>
+<form class="card" id="loginForm" autocomplete="on">
+  <div class="brand-lockup">
+    <svg class="brand-logo" viewBox="0 0 460 560" role="img" aria-label="Oligance">
+      <path fill="#06aea3" d="M247,60 L247,260 L415,160 Z"/>
+      <path fill="#06aea3" d="M50,205 L50,375 L245,290 Z"/>
+      <path fill="#5b49d3" d="M247,290 L247,480 L415,385 Z"/>
+    </svg>
+    <span class="brand-word">Oligance</span>
+  </div>
+  <div class="brand-sub">Executive Finance Dashboard</div>
+
+  <label for="email">Email</label>
+  <input type="email" id="email" name="email" required autocomplete="username" />
+
+  <label for="password">Password</label>
+  <input type="password" id="password" name="password" required autocomplete="current-password" />
+
+  <button type="submit" id="submitBtn">Sign In</button>
+  <div class="error" id="errorMsg"></div>
+</form>
+
+<script>
+  const form = document.getElementById('loginForm');
+  const errorMsg = document.getElementById('errorMsg');
+  const submitBtn = document.getElementById('submitBtn');
+
+  const params = new URLSearchParams(location.search);
+  const redirectTo = params.get('redirect') && params.get('redirect').startsWith('/')
+    ? params.get('redirect')
+    : '/';
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    errorMsg.classList.remove('visible');
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Signing in…';
+
+    try {
+      const res = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: document.getElementById('email').value,
+          password: document.getElementById('password').value,
+        }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        errorMsg.textContent = data.error || 'Sign in failed. Please try again.';
+        errorMsg.classList.add('visible');
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Sign In';
+        return;
+      }
+
+      window.location.href = redirectTo;
+    } catch {
+      errorMsg.textContent = 'Network error. Please try again.';
+      errorMsg.classList.add('visible');
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Sign In';
+    }
+  });
+</script>
+</body>
+</html>

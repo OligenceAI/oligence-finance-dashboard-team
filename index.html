@@ -32,24 +32,32 @@
         <option value="this-year">This Year</option>
         <option value="custom">Custom</option>
       </select>
-      <input type="date" id="startDate" class="control" />
+      <label class="date-field">
+        <span class="date-label">Start</span>
+        <input type="date" id="startDate" class="control" />
+      </label>
       <span class="date-sep">–</span>
-      <input type="date" id="endDate" class="control" />
+      <label class="date-field">
+        <span class="date-label">End</span>
+        <input type="date" id="endDate" class="control" />
+      </label>
     </div>
     <button id="refreshBtn" class="btn-primary">
       <span class="btn-label">Refresh</span>
       <span class="spinner" id="refreshSpinner" hidden></span>
     </button>
     <span class="last-updated" id="lastUpdated">Last updated: —</span>
+    <button id="logoutBtn" class="btn-secondary">Logout</button>
   </div>
 </header>
 
 <nav class="tabbar" id="tabbar">
   <button class="tab active" data-tab="overview">Overview</button>
   <button class="tab" data-tab="imfnd">IMFND</button>
-  <button class="tab" data-tab="as">A.S</button>
+  <button class="tab" data-tab="as">AS</button>
   <button class="tab" data-tab="oligenceai">Oligence AI</button>
   <button class="tab" data-tab="cashflow">Cash Flow</button>
+  <button class="tab tab-users" data-tab="users" id="usersTab" hidden>Add User</button>
 </nav>
 </div>
 

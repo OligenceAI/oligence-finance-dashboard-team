@@ -6,4 +6,4 @@
  * the n8n webhook URL. Loaded before data.js / app.js in index.html.
  * ========================================================================== */
 
-window.N8N_WEBHOOK_URL = 'https://primary-production-fc21a.up.railway.app/webhook/dashboard-data';
+window.N8N_WEBHOOK_URL = 'https://primary-production-fc21a.up.railway.app/webhook/dashboard-data-team';

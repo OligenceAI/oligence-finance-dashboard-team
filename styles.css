@@ -475,6 +475,29 @@ thead th:last-child { border-top-right-radius: var(--radius-sm); }
 
 thead th.num, td.num { text-align: right; }
 
+thead th.sortable {
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+thead th.sortable:hover,
+thead th.sortable:focus-visible { background: var(--accent-soft); color: var(--text); }
+
+thead th.sortable.sorted { color: var(--accent); }
+
+.sort-arrow {
+  display: inline-block;
+  margin-left: 5px;
+  font-size: 9px;
+  opacity: 0.35;
+  vertical-align: middle;
+}
+
+thead th.sortable:hover .sort-arrow { opacity: 0.7; }
+
+thead th.sortable.sorted .sort-arrow { opacity: 1; }
+
 tbody td {
   padding: 11px 12px;
   border-bottom: 1px solid var(--border);

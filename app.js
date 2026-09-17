@@ -34,6 +34,10 @@ const els = {
 
 const usersState = { list: null, loading: false, error: null, resetTarget: null };
 
+// Per-table sort, keyed by table id -> { key, dir } where dir is 'asc' | 'desc'.
+// A table with no entry (or dir null) renders rows in the webhook's original order.
+const tableSort = {};
+
 const charts = {}; // keyed by canvas id, so we can destroy/recreate on re-render
 
 // ---------------------------------------------------------------- formatting
@@ -71,6 +75,66 @@ function emptyPanel(label) {
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// ------------------------------------------------------------- table sorting
+//
+// NUMERIC columns only — text columns stay plain <th>. Sorting names alphabetically
+// depends on the viewer's browser locale, which orders Arabic inconsistently (and
+// scatters the same name spelled with/without hamza), so it is deliberately not offered.
+//
+// Usage in a render function:
+//   const sorted = sortRows(rows, 'myTable');
+//   ...<thead><tr><th>Name</th>${sortableTh('myTable', 'amount', 'Amount')}</tr></thead>
+//   ...map over `sorted`, then call attachSortHandlers() after setting innerHTML.
+// Charts should keep using the ORIGINAL array so sorting the table never reorders them.
+
+function sortRows(rows, tableId) {
+  const s = tableSort[tableId];
+  if (!s || !s.dir || !s.key) return rows;
+  const factor = s.dir === 'asc' ? 1 : -1;
+  // Missing values must not be coerced to 0 (Number(null) is 0) — that would invent a
+  // figure the webhook never sent. They sort to the bottom in both directions instead.
+  const num = (v) => (v === null || v === undefined || v === '' ? NaN : Number(v));
+  return rows.slice().sort((a, b) => {
+    const av = num(a[s.key]);
+    const bv = num(b[s.key]);
+    const aBad = !Number.isFinite(av);
+    const bBad = !Number.isFinite(bv);
+    if (aBad && bBad) return 0;
+    if (aBad) return 1;
+    if (bBad) return -1;
+    return (av - bv) * factor;
+  });
+}
+
+function sortableTh(tableId, key, label) {
+  const s = tableSort[tableId] || {};
+  const active = s.key === key && s.dir;
+  const arrow = active ? (s.dir === 'asc' ? '▲' : '▼') : '↕';
+  return `<th class="num sortable${active ? ' sorted' : ''}" data-table="${escapeHtml(tableId)}" data-sort-key="${escapeHtml(key)}" role="button" tabindex="0" title="Sort by ${escapeHtml(label)}">${escapeHtml(label)}<span class="sort-arrow">${arrow}</span></th>`;
+}
+
+// Cycles a column through ascending -> descending -> original order.
+function attachSortHandlers() {
+  els.app.querySelectorAll('th.sortable').forEach((th) => {
+    const activate = () => {
+      const tableId = th.dataset.table;
+      const key = th.dataset.sortKey;
+      const cur = tableSort[tableId] || {};
+      let dir;
+      if (cur.key !== key) dir = 'asc';
+      else if (cur.dir === 'asc') dir = 'desc';
+      else if (cur.dir === 'desc') dir = null;
+      else dir = 'asc';
+      tableSort[tableId] = dir ? { key, dir } : { key: null, dir: null };
+      render();
+    };
+    th.addEventListener('click', activate);
+    th.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(); }
+    });
+  });
 }
 
 // A client may list its services as an array (new shape) or as flat serviceType/
@@ -560,6 +624,9 @@ function renderBrand(key, displayName, errorBanner) {
   const paymentOut = (b.paymentMethods && b.paymentMethods.out) || [];
   const trends = k.trends || {};
 
+  const sortedCourses = sortRows(courses, 'brandCourses');
+  const sortedReps = sortRows(salesReps, 'brandSalesReps');
+
   const totalTickets = courses.reduce((s, c) => s + (c.tickets || 0), 0);
   const totalRevenue = courses.reduce((s, c) => s + (c.revenue || 0), 0);
   const totalRepRevenue = salesReps.reduce((s, r) => s + (r.revenue || 0), 0);
@@ -588,9 +655,9 @@ function renderBrand(key, displayName, errorBanner) {
       <div class="grid-2">
         <div class="table-scroll">
           <table>
-            <thead><tr><th>Course / Diploma</th><th class="num">Tickets Sold</th><th class="num">Cash in</th></tr></thead>
+            <thead><tr><th>Course / Diploma</th>${sortableTh('brandCourses', 'tickets', 'Tickets Sold')}${sortableTh('brandCourses', 'revenue', 'Cash in')}</tr></thead>
             <tbody>
-              ${courses.length ? courses.map((c) => `
+              ${sortedCourses.length ? sortedCourses.map((c) => `
                 <tr><td>${escapeHtml(c.name)}</td><td class="num">${(c.tickets || 0).toLocaleString('en-US')}</td><td class="num">${fmtMoney(c.revenue)}</td></tr>
               `).join('') : emptyRow(3)}
               ${courses.length ? `<tr class="total-row"><td>Total</td><td class="num">${totalTickets.toLocaleString('en-US')}</td><td class="num">${fmtMoney(totalRevenue)}</td></tr>` : ''}
@@ -606,9 +673,9 @@ function renderBrand(key, displayName, errorBanner) {
       <div class="grid-2">
         <div class="table-scroll">
           <table>
-            <thead><tr><th>Sales Representative</th><th class="num">Cash in</th><th class="num">Tickets Sold</th></tr></thead>
+            <thead><tr><th>Sales Representative</th>${sortableTh('brandSalesReps', 'revenue', 'Cash in')}${sortableTh('brandSalesReps', 'tickets', 'Tickets Sold')}</tr></thead>
             <tbody>
-              ${salesReps.length ? salesReps.map((r) => `
+              ${sortedReps.length ? sortedReps.map((r) => `
                 <tr><td>${escapeHtml(r.name)}</td><td class="num">${fmtMoney(r.revenue)}</td><td class="num">${(r.tickets || 0).toLocaleString('en-US')}</td></tr>
               `).join('') : emptyRow(3)}
               ${salesReps.length ? `<tr class="total-row"><td>Total</td><td class="num">${fmtMoney(totalRepRevenue)}</td><td class="num">${totalRepTickets.toLocaleString('en-US')}</td></tr>` : ''}
@@ -646,6 +713,8 @@ function renderBrand(key, displayName, errorBanner) {
       <div class="chart-wrap">${(paymentIn.length || paymentOut.length) ? '<canvas id="chartPaymentMethods"></canvas>' : emptyPanel()}</div>
     </div>
   `;
+
+  attachSortHandlers();
 
   if (courses.length) drawHorizontalBarChart('chartCourseRevenue', courses.map((c) => c.name), courses.map((c) => c.revenue));
   if (salesReps.length) drawHorizontalBarChart('chartSalesRepRevenue', salesReps.map((r) => r.name), salesReps.map((r) => r.revenue));

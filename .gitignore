@@ -1,3 +1,4 @@
 .wrangler/
 .dev.vars
 .claude/settings.local.json
+.mcp.json

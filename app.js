@@ -757,9 +757,9 @@ function renderOligenceAI(errorBanner) {
 
   const serviceRevenue = [];
   clients.forEach((c) => {
-    const list = c.services.length ? c.services : [{ serviceName: 'Other', revenue: c.monthlyFee || 0 }];
-    list.forEach((s) => {
-      const key = s.serviceName || 'Other';
+    (c.services || []).forEach((s) => {
+      const key = (s.serviceName || '').trim();
+      if (!key) return; // skip rows with no Service Name in the sheet
       const amount = s.revenue || 0;
       const row = serviceRevenue.find((r) => r.serviceName === key);
       if (row) row.revenue += amount;
